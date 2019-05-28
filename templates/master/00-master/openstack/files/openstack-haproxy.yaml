@@ -1,0 +1,237 @@
+filesystem: "root"
+mode: 0644
+path: /etc/kubernetes/manifests/haproxy.yaml
+contents:
+  inline: |
+    kind: Pod
+    apiVersion: v1
+    metadata:
+      name: haproxy
+      namespace: openshift-kni-infra
+      creationTimestamp:
+      deletionGracePeriodSeconds: 65
+      labels:
+        app: kni-infra-api-lb
+    spec:
+      volumes:
+      - name: resource-dir
+        hostPath:
+          path: "/etc/kubernetes/static-pod-resources/haproxy"
+      - name: oc
+        hostPath:
+          path: "/bin/oc"
+      - name: run-dir
+        empty-dir: {}
+      - name: conf-dir
+        empty-dir: {}
+      - name: chroot-host
+        hostPath:
+          path: "/"
+      - name: kubelet
+        hostPath:
+          path: "/var/lib/kubelet"
+      initContainers:
+      - name: render-haproxy-cfg
+        image: quay.io/openshift/origin-node:latest
+        env:
+        - name: api_port
+          value: "6443"
+        - name: stat_port
+          value: "50000"
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          #!/bin/bash
+          set -x
+          # NOTE(flaper87): We're doing this here for now
+          # because our current vendored verison for terraform
+          # doesn't support appending to an ignition_file. This
+          # is coming in 2.3
+          export KUBECONFIG=/var/lib/kubelet/kubeconfig
+          TEMPLATE="{{range .items}}{{\$addresses:=.status.addresses}}{{range .status.conditions}}{{if eq .type \"Ready\"}}{{if eq .status \"True\" }}{{range \$addresses}}{{if eq .type \"InternalIP\"}}{{.address}}{{end}}{{end}}{{end}}{{end}}{{end}} {{end}}"
+          MASTERS=$(/host/bin/oc get nodes -l node-role.kubernetes.io/master -ogo-template="$TEMPLATE")
+          WORKERS=$(/host/bin/oc get nodes -l node-role.kubernetes.io/worker -ogo-template="$TEMPLATE")
+          update_cfg_and_restart() {
+              CHANGED=$(diff /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.new)
+              if [[ ! -f /etc/haproxy/haproxy.cfg ]] || [[ -z "$CHANGED" ]];
+              then
+                  cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup || true
+                  cp /etc/haproxy/haproxy.cfg.new /etc/haproxy/haproxy.cfg
+                  echo "reload" | socat /var/run/haproxy/haproxy-master.sock -
+              fi
+          }
+
+          lb_port="7443"
+          api_port="6443"
+          rules=$(iptables -L PREROUTING -n -t nat --line-numbers | awk '/OCP_API_LB_REDIRECT/ {print $1}'  | tac)
+          if [[ -z "$rules" ]]; then
+              # FIXME(mandre) Get the cluster CIDR block from the installer
+              # This would be even better to put this rule directly in terraform or ignition
+              iptables -t nat -I PREROUTING ! --src 172.30.0.0/16 --dst 0/0 -p tcp --dport "$api_port" -j REDIRECT --to-ports "$lb_port" -m comment --comment "OCP_API_LB_REDIRECT"
+          fi
+
+          # FIXME(mandre) we shouldn't need to add boostrap node here
+          # This should fix the back and forth between bootstrap and prod control plane
+          if [[ -z "$MASTERS" ]];
+          then
+          cat > /etc/haproxy/haproxy.cfg.new << EOF
+          listen {{.EtcdDiscoveryDomain}}-api-masters
+              bind 0.0.0.0:7443
+              mode tcp
+              balance roundrobin
+              server bootstrap-6443 {{bootstrapIP . }} check port 6443
+          EOF
+              update_cfg_and_restart
+              exit 0
+          fi
+          for master in $MASTERS;
+          do
+              MASTER_LINES="$MASTER_LINES
+              server $master $master check port 6443"
+          done
+          for worker in $WORKERS;
+          do
+              WORKER_LINES="$WORKER_LINES
+              server $worker $worker check port 443"
+          done
+          cat > /etc/haproxy/haproxy.cfg.new << EOF
+          listen {{.EtcdDiscoveryDomain}}-api-masters
+              bind 0.0.0.0:7443
+              mode tcp
+              balance roundrobin$MASTER_LINES
+          listen {{.EtcdDiscoveryDomain}}-api-workers
+              bind 0.0.0.0:80
+              bind 0.0.0.0:443
+              mode tcp
+              balance roundrobin$WORKER_LINES
+          EOF
+          update_cfg_and_restart
+        resources: {}
+        volumeMounts:
+        - name: kubeconfig
+          mountPath: "/etc/kubernetes/kubeconfig"
+        - name: conf-dir
+          mountPath: "/etc/haproxy"
+        - name: kubelet
+          mountPath: /var/lib/kubelet"
+        - name: chroot-host
+          mountPath: "/host"
+        - name: resource-dir
+          mountPath: "/etc/haproxy"
+        imagePullPolicy: IfNotPresent
+      containers:
+      - name: haproxy
+        image: docker.io/library/haproxy:latest
+        args:
+        - "-W"
+        - "-db"
+        - "-S"
+        - "/var/run/haproxy/haproxy-master.sock,level,admin"
+        - "-f"
+        - "/etc/haproxy/haproxy.cfg"
+        volumeMounts:
+        - name: conf-dir
+          mountPath: "/etc/haproxy"
+        - name: run-dir
+          mountPath: "/var/run/haproxy"
+        terminationMessagePolicy: FallbackToLogsOnError
+        imagePullPolicy: IfNotPresent
+      - name: haproxy-monitor
+        securityContext:
+          privileged: true
+        image: quay.io/openshift/origin-node:latest
+        env:
+        - name: cfg_path
+          value: "/etc/haproxy/haproxy.cfg"
+        - name: api_port
+          value: "6443"
+        - name: lb_port
+          value: "7443"
+        - name: stat_port
+          value: "50000"
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          #!/bin/bash
+          set -x
+          # NOTE(flaper87): We're doing this here for now
+          # because our current vendored verison for terraform
+          # doesn't support appending to an ignition_file. This
+          # is coming in 2.3
+          export KUBECONFIG=/var/lib/kubelet/kubeconfig
+          TEMPLATE="{{range .items}}{{\$addresses:=.status.addresses}}{{range .status.conditions}}{{if eq .type \"Ready\"}}{{if eq .status \"True\" }}{{range \$addresses}}{{if eq .type \"InternalIP\"}}{{.address}}{{end}}{{end}}{{end}}{{end}}{{end}} {{end}}"
+          MASTERS=$(/host/bin/oc get nodes -l node-role.kubernetes.io/master -ogo-template="$TEMPLATE")
+          WORKERS=$(/host/bin/oc get nodes -l node-role.kubernetes.io/worker -ogo-template="$TEMPLATE")
+          update_cfg_and_restart() {
+              CHANGED=$(diff /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.new)
+              if [[ ! -f /etc/haproxy/haproxy.cfg ]] || [[ -z "$CHANGED" ]];
+              then
+                  cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup || true
+                  cp /etc/haproxy/haproxy.cfg.new /etc/haproxy/haproxy.cfg
+                  echo "reload" | socat /var/run/haproxy/haproxy-master.sock -
+              fi
+          }
+
+          lb_port="7443"
+          api_port="6443"
+          rules=$(iptables -L PREROUTING -n -t nat --line-numbers | awk '/OCP_API_LB_REDIRECT/ {print $1}'  | tac)
+          if [[ -z "$rules" ]]; then
+              # FIXME(mandre) Get the cluster CIDR block from the installer
+              # This would be even better to put this rule directly in terraform or ignition
+              iptables -t nat -I PREROUTING ! --src 172.30.0.0/16 --dst 0/0 -p tcp --dport "$api_port" -j REDIRECT --to-ports "$lb_port" -m comment --comment "OCP_API_LB_REDIRECT"
+          fi
+
+          # FIXME(mandre) we shouldn't need to add boostrap node here
+          # This should fix the back and forth between bootstrap and prod control plane
+          if [[ -z "$MASTERS" ]];
+          then
+          cat > /etc/haproxy/haproxy.cfg.new << EOF
+          listen {{.EtcdDiscoveryDomain}}-api-masters
+              bind 0.0.0.0:7443
+              mode tcp
+              balance roundrobin
+              server bootstrap-6443 {{bootstrapIP . }} check port 6443
+          EOF
+              update_cfg_and_restart
+              exit 0
+          fi
+          for master in $MASTERS;
+          do
+              MASTER_LINES="$MASTER_LINES
+              server $master $master check port 6443"
+          done
+          for worker in $WORKERS;
+          do
+              WORKER_LINES="$WORKER_LINES
+              server $worker $worker check port 443"
+          done
+          cat > /etc/haproxy/haproxy.cfg.new << EOF
+          listen {{.EtcdDiscoveryDomain}}-api-masters
+              bind 0.0.0.0:7443
+              mode tcp
+              balance roundrobin$MASTER_LINES
+          listen {{.EtcdDiscoveryDomain}}-api-workers
+              bind 0.0.0.0:80
+              bind 0.0.0.0:443
+              mode tcp
+              balance roundrobin$WORKER_LINES
+          EOF
+          update_cfg_and_restart
+        volumeMounts:
+        - name: conf-dir
+          mountPath: "/etc/haproxy"
+        - name: run-dir
+          mountPath: "/var/run/haproxy"
+        - name: resource-dir
+          mountPath: "/etc/kubernetes/static-pod-resources"
+        - name: chroot-host
+          mountPath: "/host"
+        terminationMessagePolicy: FallbackToLogsOnError
+        imagePullPolicy: IfNotPresent
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+      priorityClassName: system-node-critical
+    status: {}

@@ -1,0 +1,77 @@
+filesystem: "root"
+mode: 0755
+path: "/etc/kubernetes/static-pod-resources/haproxy/resources/haproxy-watcher.sh"
+contents:
+  inline: |
+    #!/bin/bash
+    update_cfg_and_restart() {
+        CHANGED=$(diff /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.new)
+        if [[ ! -f /etc/haproxy/haproxy.cfg ]] || [[ -n "$CHANGED" ]];
+        then
+            cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup || true
+            cp /etc/haproxy/haproxy.cfg.new /etc/haproxy/haproxy.cfg
+            echo "reload" | socat /var/run/haproxy/haproxy-master.sock -
+        fi
+    }
+
+    # NOTE(flaper87): We're doing this here for now
+    # because our current vendored verison for terraform
+    # doesn't support appending to an ignition_file. This
+    # is coming in 2.3
+    export KUBECONFIG=/var/lib/kubelet/kubeconfig
+
+    # lb_port="7443"
+    # api_port="6443"
+    rules=$(iptables -L PREROUTING -n -t nat --line-numbers | awk '/OCP_API_LB_REDIRECT/ {print $1}'  | tac)
+    if [[ -z "$rules" ]]; then
+        # FIXME(mandre) Get the cluster CIDR block from the installer
+        # This would be even better to put this rule directly in terraform or ignition
+        iptables -t nat -I PREROUTING ! --src 172.30.0.0/16 --dst 0/0 -p tcp --dport "$api_port" -j REDIRECT --to-ports "$lb_port" -m comment --comment "OCP_API_LB_REDIRECT"
+    fi
+
+    TEMPLATE="{{`{{range .items}}{{\$addresses:=.status.addresses}}{{range .status.conditions}}{{if eq .type \"Ready\"}}{{if eq .status \"True\" }}{{range \$addresses}}{{if eq .type \"InternalIP\"}}{{.address}}{{end}}{{end}}{{end}}{{end}}{{end}} {{end}}`}}"
+    while true; do
+    if [ -f /var/lib/kubelet/pki/kubelet-client-current.pem ]; then
+        MASTERS=$(/bin/oc get nodes -l node-role.kubernetes.io/master -ogo-template="$TEMPLATE")
+        WORKERS=$(/bin/oc get nodes -l node-role.kubernetes.io/worker -ogo-template="$TEMPLATE")
+    fi
+
+    # FIXME(mandre) we shouldn't need to add boostrap node here
+    # This should fix the back and forth between bootstrap and prod control plane
+    if [[ -z "$MASTERS" ]];
+    then
+    cat > /etc/haproxy/haproxy.cfg.new << EOF
+    listen {{.EtcdDiscoveryDomain}}-api-masters
+        bind 0.0.0.0:7443
+        mode tcp
+        balance roundrobin
+        server bootstrap-6443 {{bootstrapIP . }} check port 6443
+    EOF
+        update_cfg_and_restart
+        continue
+    fi
+    for master in $MASTERS;
+    do
+        MASTER_LINES="$MASTER_LINES
+        server $master $master check port 6443"
+    done
+    for worker in $WORKERS;
+    do
+        WORKER_LINES="$WORKER_LINES
+        server $worker $worker check port 443"
+    done
+    cat > /etc/haproxy/haproxy.cfg.new << EOF
+    listen {{.EtcdDiscoveryDomain}}-api-masters
+        bind 0.0.0.0:7443
+        mode tcp
+        balance roundrobin$MASTER_LINES
+    listen {{.EtcdDiscoveryDomain}}-api-workers
+        bind 0.0.0.0:80
+        bind 0.0.0.0:443
+        mode tcp
+        balance roundrobin$WORKER_LINES
+    EOF
+    update_cfg_and_restart
+    # Wait for 2 min
+    sleep 120
+    done

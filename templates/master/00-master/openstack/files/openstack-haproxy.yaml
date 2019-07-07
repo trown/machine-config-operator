@@ -25,6 +25,9 @@ contents:
       - name: resource-dir
         hostPath:
           path: "/etc/kubernetes/static-pod-resources/haproxy/resources"
+      - name: clustervars
+        hostPath:
+          path: "/etc/kubernetes/static-pod-resources/clustervars"
       - name: kubelet
         hostPath:
           path: "/var/lib/kubelet"
@@ -52,6 +55,8 @@ contents:
           mountPath: "/opt/haproxy"
         - name: run-dir
           mountPath: "/var/run/haproxy"
+        - name: clustervars
+          mountPath: "/etc/kubernetes/static-pod-resources/clustervars"
         - name: kubelet
           mountPath: "/var/lib/kubelet"
         - name: oc

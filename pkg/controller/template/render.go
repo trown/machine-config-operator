@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -317,7 +316,6 @@ func renderTemplate(config RenderConfig, path string, b []byte) ([]byte, error) 
 	funcs["etcdServerCertDNSNames"] = etcdServerCertDNSNames
 	funcs["etcdPeerCertDNSNames"] = etcdPeerCertDNSNames
 	funcs["cloudProvider"] = cloudProvider
-	funcs["bootstrapIP"] = bootstrapIP
 	funcs["cloudConfigFlag"] = cloudConfigFlag
 	tmpl, err := template.New(path).Funcs(funcs).Parse(string(b))
 	if err != nil {
@@ -414,21 +412,4 @@ func existsDir(path string) (bool, error) {
 		return false, fmt.Errorf("expected template directory, %q is not a directory", path)
 	}
 	return true, nil
-}
-
-// bootstrapIP finds the ip address of the boostrap node
-func bootstrapIP(cfg RenderConfig) interface{} {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return ""
-	}
-
-	defer conn.Close()
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	switch cfg.Platform {
-	case platformAzure, platformOpenstack:
-		return localAddr.IP
-	default:
-		return ""
-	}
 }

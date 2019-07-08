@@ -21,6 +21,12 @@ contents:
         source /etc/kubernetes/static-pod-resources/clustervars
     fi
 
+    # FIXME(mandre) sometimes noticed it fails to talk to kube-api because the
+    # certs are missing. Not sure if they're not created or deleted. We need to
+    # find a more reliable way to query kube-api for nodes.
+    # KNI gets the address of the master nodes by querying the SRV records for
+    # "_etcd-server-ssl._tcp.$domain"
+    # https://github.com/openshift-metal3/dev-scripts/blob/master/assets/files/etc/kubernetes/static-pod-resources/haproxy/utils.sh#L3
     export KUBECONFIG=/var/lib/kubelet/kubeconfig
 
     rules=$(iptables -L PREROUTING -n -t nat --line-numbers | awk '/OCP_API_LB_REDIRECT/ {print $1}'  | tac)

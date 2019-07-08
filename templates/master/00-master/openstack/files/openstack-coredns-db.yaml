@@ -12,12 +12,10 @@ contents:
                                     3600       ; minimum (1 hour)
                                     )
 
-    api IN A $FLOATING_IP
+    api IN A $API_VIP
+    # FIXME(mandre) we should probably have a different VIP for api and api-int
+    api-int IN A $API_VIP
     
-    *.apps IN A $MASTER_FIXED_IPS_0
-    *.apps IN A $MASTER_FIXED_IPS_1
-    *.apps IN A $MASTER_FIXED_IPS_2
-
-    api-int IN A $MASTER_FIXED_IPS_0
-    api-int IN A $MASTER_FIXED_IPS_1
-    api-int IN A $MASTER_FIXED_IPS_2
+    # FIXME(mandre) do we need this here?
+    # Should the master really do LB for the worker nodes?
+    *.apps IN A $API_VIP

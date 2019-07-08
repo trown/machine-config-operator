@@ -39,9 +39,8 @@ contents:
           PREFIX="${SUBNET_CIDR#*/}"
           export NON_VIRTUAL_IP="${SUBNET_CIDR%/*}"
           
-          HOST_NUM="$(hostname -s | grep -o '[0-9]\+$')"
-          export MASTER_HOSTNAME="master-$HOST_NUM.local."
-          export ETCD_HOSTNAME="etcd-$HOST_NUM.local."
+          HOSTNAME_SUFFIX="$(hostname -I | awk '{print $1}' | tr . -)"
+          export WORKER_HOSTNAME="host-$HOSTNAME_SUFFIX.local."
           
           /usr/libexec/platform-python -c "from __future__ import print_function
           import os

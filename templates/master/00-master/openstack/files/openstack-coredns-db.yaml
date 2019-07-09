@@ -13,9 +13,7 @@ contents:
                                     )
 
     api IN A $API_VIP
-    # FIXME(mandre) we should probably have a different VIP for api and api-int
     api-int IN A $API_VIP
     
-    # FIXME(mandre) do we need this here?
-    # Should the master really do LB for the worker nodes?
+    ; FIXME(mandre) change it to INGRESS_VIP
     *.apps IN A $API_VIP
